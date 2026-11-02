@@ -19,6 +19,7 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/common_funcs.h"
 #include "core/file_sys/content_archive.h"
+#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/submission_package.h"
 #include "core/hle/kernel/k_process.h"
@@ -149,6 +150,60 @@ FileType IdentifyFile(FileSys::VirtualFile file) {
     } else {
         return FileType::Unknown;
     }
+}
+
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id,
+                      std::size_t program_index) {
+    if (file == nullptr) {
+        return false;
+    }
+
+    FileSys::ProgramMetadata metadata;
+    if (FileSys::NupContainer::IsNupFile(file)) {
+        FileSys::NupContainer nup{file};
+        if (nup.GetStatus() != Loader::ResultStatus::Success) {
+            return false;
+        }
+        std::optional<std::size_t> program;
+        if (const auto base = nup.FindBasePackage();
+            base && nup.GetExeFSDir(*base) != nullptr) {
+            program = base;
+        } else if (const auto update = nup.FindBestUpdatePackage();
+                   update && nup.GetExeFSDir(*update) != nullptr) {
+            program = update;
+        }
+        const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+    u32 magic{};
+    if (file->ReadObject(&magic) == sizeof(magic) &&
+        magic == Common::MakeMagic('P', 'F', 'S', '0')) {
+        const auto nsp = OpenContainerAsNsp(file, FileType::NSP, program_id, program_index);
+        if (nsp == nullptr || nsp->GetProgramStatus() != ResultStatus::Success) {
+            return false;
+        }
+
+        FileSys::VirtualDir exefs;
+        if (nsp->IsExtractedType()) {
+            exefs = nsp->GetExeFS();
+        } else {
+            const auto program =
+                nsp->GetNCA(nsp->GetProgramTitleID(), FileSys::ContentRecordType::Program);
+            if (program != nullptr && program->GetStatus() == ResultStatus::Success) {
+                exefs = program->GetExeFS();
+            }
+        }
+        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
+        return npdm != nullptr && metadata.Load(npdm) == ResultStatus::Success &&
+               metadata.IsSwitch2();
+    }
+
+    const auto dir = file->GetContainingDirectory();
+    const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
+    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
+           metadata.IsSwitch2();
 }
 
 bool IsContainerType(FileType type) {

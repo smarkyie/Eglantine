@@ -64,6 +64,11 @@ FileType IdentifyFile(FileSys::VirtualFile file);
  */
 bool IsContainerType(FileType type);
 
+/// Detect Switch 2 metadata before initializing the kernel, memory layout and guest clock.
+/// NSPs use the selected program's embedded NPDM; loose ExeFS and NUP remain supported.
+bool IsSwitch2Program(const FileSys::VirtualFile& file, u64 program_id = 0,
+                      std::size_t program_index = 0);
+
 /**
  * Returns whether a container file is bootable as a game (has Application/Program content).
  *
