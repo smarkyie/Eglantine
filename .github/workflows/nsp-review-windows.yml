@@ -21,6 +21,9 @@ jobs:
     name: Windows x64 build and tests
     runs-on: windows-2022
     timeout-minutes: 120
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 3G
     steps:
       - name: Check out test branch
         uses: actions/checkout@v5
@@ -42,12 +45,40 @@ jobs:
         shell: powershell
         run: ./tools/windows/install-vulkan-sdk.ps1
 
+      - name: Install compiler cache
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP sccache.zip
+          Invoke-WebRequest -OutFile $zip https://github.com/mozilla/sccache/releases/download/v0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc.zip
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP sccache)
+          $bin = (Get-ChildItem -Recurse -Filter sccache.exe (Join-Path $env:RUNNER_TEMP sccache)).DirectoryName
+          $bin | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
       - name: Cache dependency downloads
-        uses: actions/cache@v5
+        id: dependencies
+        uses: actions/cache/restore@v5
         with:
           path: .cache/cpm
           key: nsp-review-cpm-windows-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'src/**/CMakeLists.txt') }}
           restore-keys: nsp-review-cpm-windows-
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .sccache
+          key: nsp-review-objects-windows-${{ github.run_id }}
+          restore-keys: nsp-review-objects-windows-
+
+      - name: Allow existing NUP test signedness warning on MSVC
+        shell: pwsh
+        run: |
+          # Upstream nup_writer.cpp:211 compares optional<size_t> with int.
+          # Keep the test/assertion intact and scope this CI-only workaround to that file.
+          @'
+          if (MSVC)
+              set_property(SOURCE core/nup_writer.cpp APPEND PROPERTY COMPILE_OPTIONS /wd4388)
+          endif()
+          '@ | Add-Content src/tests/CMakeLists.txt -Encoding utf8
 
       - name: Configure with tests enabled
         shell: pwsh
@@ -58,6 +89,7 @@ jobs:
             -DBUILD_TESTING=ON -DYUZU_TESTS=ON `
             -DYUZU_CMD=ON -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF `
             -DYUZU_USE_BUNDLED_QT=OFF -DYUZU_USE_BUNDLED_SDL3=ON `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
             -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF `
             2>&1 | Tee-Object results/configure.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -65,7 +97,7 @@ jobs:
       - name: Build GUI, CLI and tests
         shell: pwsh
         run: |
-          cmake --build build/review --target yuzu yuzu-cmd tests --parallel 2 `
+          cmake --build build/review --target yuzu yuzu-cmd tests --parallel 4 `
             2>&1 | Tee-Object results/build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -123,3 +155,17 @@ jobs:
           path: results/
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Save dependency cache even after a build failure
+        if: always() && steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/cpm
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
+
+      - name: Save compiler cache even after a build failure
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .sccache
+          key: nsp-review-objects-windows-${{ github.run_id }}
