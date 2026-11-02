@@ -1,0 +1,125 @@
+name: NSP metadata Windows test build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/nsp-switch2-detection
+    paths:
+      - src/**
+      - .github/workflows/nsp-review-windows.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nsp-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64 build and tests
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Check out test branch
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Cache dependency downloads
+        uses: actions/cache@v5
+        with:
+          path: .cache/cpm
+          key: nsp-review-cpm-windows-${{ hashFiles('cpmfile.json', 'CMakeLists.txt', 'src/**/CMakeLists.txt') }}
+          restore-keys: nsp-review-cpm-windows-
+
+      - name: Configure with tests enabled
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force results | Out-Null
+          cmake -S . -B build/review -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=ON -DYUZU_TESTS=ON `
+            -DYUZU_CMD=ON -DYUZU_ROOM=OFF -DYUZU_ROOM_STANDALONE=OFF `
+            -DYUZU_USE_BUNDLED_QT=OFF -DYUZU_USE_BUNDLED_SDL3=ON `
+            -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF `
+            2>&1 | Tee-Object results/configure.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build GUI, CLI and tests
+        shell: pwsh
+        run: |
+          cmake --build build/review --target yuzu yuzu-cmd tests --parallel 2 `
+            2>&1 | Tee-Object results/build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run metadata regression tests
+        shell: pwsh
+        run: |
+          & ./build/review/bin/tests.exe '[loader][switch2]' --reporter JUnit --out results/switch2-tests.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run complete unit test suite
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          & ./build/review/bin/tests.exe --reporter JUnit --out results/all-tests.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare portable test build
+        shell: pwsh
+        run: |
+          foreach ($exe in 'eglantine.exe', 'eden-cli.exe') {
+            if (-not (Test-Path "build/review/bin/$exe")) { throw "Missing $exe" }
+          }
+          windeployqt --release --no-translations build/review/bin/eglantine.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath LICENSE.txt -Destination build/review/bin/LICENSE.txt
+          Copy-Item -LiteralPath LICENSES -Destination build/review/bin/LICENSES -Recurse
+          @"
+          UNOFFICIAL EGLANTINE NSP METADATA TEST BUILD
+          Source: https://github.com/${{ github.repository }}/tree/${{ github.sha }}
+          Commit: ${{ github.sha }}
+          Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          This is a test artifact, not an upstream release.
+          No game files, firmware, keys or profiles are included.
+          Test with a separate emulator profile and your own lawfully obtained data.
+          Binary patching and an external main.npdm are unnecessary for the embedded-NSP detection being tested.
+          Passing unit tests does not establish game compatibility or equal performance.
+          "@ | Set-Content build/review/bin/TEST-BUILD.txt -Encoding utf8
+
+      - name: Upload Windows portable test build
+        uses: actions/upload-artifact@v7
+        with:
+          name: Eglantine-NSP-test-Windows-x64-${{ github.sha }}
+          path: |
+            build/review/bin/
+            !build/review/bin/tests.exe
+            !build/review/bin/*.pdb
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build and test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Eglantine-NSP-test-reports-${{ github.run_id }}
+          path: results/
+          if-no-files-found: ignore
+          retention-days: 7
