@@ -25,9 +25,7 @@
 #include "core/debugger/debugger.h"
 #include "core/device_memory.h"
 #include "core/file_sys/fs_filesystem.h"
-#include "core/file_sys/nup_container.h"
 #include "core/file_sys/patch_manager.h"
-#include "core/file_sys/program_metadata.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/file_sys/savedata_factory.h"
@@ -112,37 +110,6 @@ FileSys::VirtualFile GetGameFileFromPath(const FileSys::VirtualFilesystem& vfs,
 
     return vfs->OpenFile(path, FileSys::OpenMode::Read);
 }
-
-namespace {
-
-// Switch 2 titles boot as a loose ExeFS, with main.npdm next to main.
-bool IsSwitch2Program(const FileSys::VirtualFile& file) {
-    FileSys::ProgramMetadata metadata;
-    if (FileSys::NupContainer::IsNupFile(file)) {
-        FileSys::NupContainer nup{file};
-        if (nup.GetStatus() != Loader::ResultStatus::Success) {
-            return false;
-        }
-        std::optional<std::size_t> program;
-        if (const auto base = nup.FindBasePackage();
-            base && nup.GetExeFSDir(*base) != nullptr) {
-            program = base;
-        } else if (const auto update = nup.FindBestUpdatePackage();
-                   update && nup.GetExeFSDir(*update) != nullptr) {
-            program = update;
-        }
-        const auto exefs = program ? nup.GetExeFSDir(*program) : nullptr;
-        const auto npdm = exefs != nullptr ? exefs->GetFile("main.npdm") : nullptr;
-        return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-               metadata.IsSwitch2();
-    }
-    const auto dir = file != nullptr ? file->GetContainingDirectory() : nullptr;
-    const auto npdm = dir != nullptr ? dir->GetFile("main.npdm") : nullptr;
-    return npdm != nullptr && metadata.Load(npdm) == Loader::ResultStatus::Success &&
-           metadata.IsSwitch2();
-}
-
-} // namespace
 
 struct System::Impl {
     explicit Impl(System& system)
@@ -336,7 +303,8 @@ struct System::Impl {
 
         const bool switch2_program =
             virtual_filesystem != nullptr &&
-            IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath));
+            Loader::IsSwitch2Program(GetGameFileFromPath(virtual_filesystem, filepath),
+                                     params.program_id, params.program_index);
         Settings::SetCurrentProgramIsSwitch2(switch2_program);
         Settings::SetAstcRecompressionOverride(std::nullopt);
 
